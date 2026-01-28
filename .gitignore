@@ -1,1 +1,6 @@
 oldGraphSmile/
+.vscode/
+__pycache__/
+data/
+results/
+saved_models/

@@ -9,6 +9,51 @@ def _get_clones(module, N):
     return nn.ModuleList([copy.deepcopy(module) for _ in range(N)])
 
 
+class HeterGConv_Edge(torch.nn.Module):
+
+    def __init__(self, feature_size, encoder_layer, num_layers, dropout,
+                 no_cuda):
+        super(HeterGConv_Edge, self).__init__()
+        self.num_layers = num_layers
+        self.no_cuda = no_cuda
+
+        self.edge_weight = None
+
+        self.hetergcn_layers = _get_clones(encoder_layer, num_layers)
+        self.fc_layers = _get_clones(nn.Sequential(nn.Linear(feature_size, feature_size),
+                                    nn.LeakyReLU(), nn.Dropout(dropout)), num_layers)
+
+    def forward(self, feature_tuple, dia_lens, win_p, win_f, edge_index=None):
+
+        num_modal = len(feature_tuple)
+        feature = torch.cat(feature_tuple, dim=0)
+
+        if edge_index is None:
+            edge_index = self._heter_no_weight_edge(feature, num_modal,
+                                                    dia_lens, win_p, win_f)
+        num_edges_needed = edge_index.size(1)
+        device = feature.device
+        if self.edge_weight is None:
+            self.edge_weight = nn.Parameter(torch.ones(num_edges_needed, device=device))
+            self.register_parameter('edge_weight', self.edge_weight)
+        elif self.edge_weight.size(0) < num_edges_needed:
+            new_weights = nn.Parameter(torch.ones(num_edges_needed - self.edge_weight.size(0), device=device))
+            self.edge_weight = nn.Parameter(torch.cat([self.edge_weight, new_weights], dim=0))
+            self.register_parameter('edge_weight', self.edge_weight)
+        edge_weight = self.edge_weight[:num_edges_needed]
+
+        adj_weight = self._edge_index_to_adjacency_matrix(
+            edge_index,
+            edge_weight,
+            num_nodes=feature.size(0),
+            no_cuda=self.no_cuda)
+        feature_sum = feature
+        for i in range(self.num_layers):
+            feature = self.hetergcn_layers[i](feature, num_modal, adj_weight)
+            feature_sum = feature_sum + self.fc_layers[i](feature)
+        feat_tuple = torch.chunk(feature_sum, num_modal, dim=0)
+
+        return feat_tuple, edge_index
 
     def _edge_index_to_adjacency_matrix(self,
                                         edge_index,
@@ -37,7 +82,6 @@ def _get_clones(module, N):
             gcn_fact = gcn_fact.cuda()
 
         return gcn_fact
-
 
     def _heter_no_weight_edge(self, feature, num_modal, dia_lens, win_p,
                               win_f):
@@ -75,6 +119,8 @@ def _get_clones(module, N):
                           1, 0))
 
         return edge_index
+
+
 
 class HeterGConvLayer(torch.nn.Module):
 

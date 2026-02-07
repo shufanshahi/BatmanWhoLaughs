@@ -5,6 +5,7 @@ import copy
 import torch.nn as nn
 from torch.nn import Parameter
 
+
 def _get_clones(module, N):
     return nn.ModuleList([copy.deepcopy(module) for _ in range(N)])
 
@@ -121,7 +122,6 @@ class HeterGConv_Edge(torch.nn.Module):
         return edge_index
 
 
-
 class HeterGConvLayer(torch.nn.Module):
 
     def __init__(self, feature_size, dropout=0.3, no_cuda=False):
@@ -138,7 +138,7 @@ class HeterGConvLayer(torch.nn.Module):
             feature_heter = feature
 
         return feature_heter
-    
+
 
 class SGConv_Our(torch.nn.Module):
     """
@@ -174,3 +174,115 @@ class SGConv_Our(torch.nn.Module):
             return output + self.bias
         else:
             return output
+
+
+class SenShift_Feat(nn.Module):
+
+    def __init__(self, hidden_dim, dropout, shift_win):
+        super().__init__()
+
+        self.shift_win = shift_win
+
+        hidden_dim_shift = 2 * hidden_dim
+
+        self.shift_output_layer = nn.Sequential(nn.Linear(hidden_dim_shift,
+                                                          2), )
+
+    def forward(self, embeds, embeds_temp=None, dia_lens=[]):
+
+        if embeds_temp == None:
+            embeds_temp = embeds
+        embeds_shift = self._build_match_sample(embeds, embeds_temp, dia_lens,
+                                                self.shift_win)
+        logits = self.shift_output_layer(embeds_shift)
+
+        return logits
+
+    def _build_match_sample(self, embeds, embeds_temp, dia_lens, shift_win):
+
+        start = 0
+        embeds_shifts = []
+        if shift_win == -1:
+            for dia_len in dia_lens:
+                embeds_shifts.append(
+                    torch.cat(
+                        [
+                            embeds[start:start + dia_len, None, :].repeat(
+                                1, dia_len, 1),
+                            embeds_temp[None, start:start + dia_len, :].repeat(
+                                dia_len, 1, 1),
+                        ],
+                        dim=-1,
+                    ).view(-1, 2 * embeds.size(-1)))
+                start += dia_len
+            embeds_shift = torch.cat(embeds_shifts, dim=0)
+
+        elif shift_win > 0:
+            for dia_len in dia_lens:
+                win_start = 0
+                for i in range(math.ceil(dia_len / shift_win)):
+                    if (i == math.ceil(dia_len / shift_win) - 1
+                            and dia_len % shift_win != 0):
+                        win = dia_len % shift_win
+                    else:
+                        win = shift_win
+                    embeds_shifts.append(
+                        torch.cat(
+                            [
+                                embeds[
+                                    start + win_start : start + win_start + win, None, :
+                                ].repeat(1, win, 1),
+                                embeds_temp[
+                                    None, start + win_start : start + win_start + win, :
+                                ].repeat(win, 1, 1),
+                            ],
+                            dim=-1,
+                        ).view(-1, 2 * embeds.size(-1))
+                    )
+                    win_start += shift_win
+                start += dia_len
+            embeds_shift = torch.cat(embeds_shifts, dim=0)
+        else:
+            print("Window must be greater than 0 or equal to -1")
+            raise NotImplementedError
+
+        return embeds_shift
+
+
+def build_match_sen_shift_label(shift_win, dia_lengths, label_sen):
+    start = 0
+    label_shifts = []
+    if shift_win == -1:
+        for dia_len in dia_lengths:
+            dia_label_shift = ((label_sen[start:start + dia_len, None]
+                                != label_sen[None, start:start +
+                                             dia_len]).long().view(-1))
+            label_shifts.append(dia_label_shift)
+            start += dia_len
+        label_shift = torch.cat(label_shifts, dim=0)
+    elif shift_win > 0:
+        for dia_len in dia_lengths:
+            win_start = 0
+            for i in range(math.ceil(dia_len / shift_win)):
+                if i == math.ceil(
+                        dia_len / shift_win) - 1 and dia_len % shift_win != 0:
+                    win = dia_len % shift_win
+                else:
+                    win = shift_win
+                dia_label_shift = (
+                    (
+                        label_sen[start + win_start : start + win_start + win, None]
+                        != label_sen[None, start + win_start : start + win_start + win]
+                    )
+                    .long()
+                    .view(-1)
+                )
+                label_shifts.append(dia_label_shift)
+                win_start += shift_win
+            start += dia_len
+        label_shift = torch.cat(label_shifts, dim=0)
+    else:
+        print('Window must be greater than 0 or equal to -1')
+        raise NotImplementedError
+
+    return label_shift
